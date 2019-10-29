@@ -1,0 +1,359 @@
+---
+title: "Capstone ML : SMS"
+author: "Wahyudi Tri"
+date: "`r format(Sys.Date(), '%A, %B-%d-%Y')`"
+output:
+  rmdformats::readthedown:
+    self_contained : yes
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 99)
+
+library(rmdformats)
+```
+
+# Introduction
+
+## Capstone Project
+
+This project is my final step in machine learning course. And I chose SMS dataset as my machine learning capstone project.
+The SMS dataset is a set of SMS tagged messages that have been collected by Team Algoritma. It contains one set of SMS messages in Bahasa Indonesia of 2.004 messages, tagged acording being ham (legitimate) or spam.
+
+I will use this dataset to build a prediction model that will accurately classify which texts are spam or ham(legitimate). I use The Naive Bayes algorithm and compare with The Decision Tree algorithm to find the best model for this dataset. 
+
+
+# Setting up the environment
+
+First load all the required libraries(packages)
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(lubridate)
+library(tm)
+library(readr)
+library(e1071)
+library(caret)
+library(RColorBrewer)
+library(wordcloud)
+library(ggplot2)
+library(plotly)
+library(partykit)
+```
+
+# Data Preparing
+
+## Reading the data
+
+```{r}
+
+sms <- read.csv("C2/C2/data_input/sms-cl-spam/data/data-train.csv", stringsAsFactors = FALSE, encoding = "UTF-8")
+glimpse(sms)
+```
+
+## Visualize the Data
+
+```{r}
+sms$datetime <- ymd_hms(sms$datetime)
+sms <- sms %>% 
+  mutate(Hour = hour(datetime))
+
+plot1 <- ggplot(sms, aes(Hour, fill= status)) + 
+  geom_bar() + 
+  facet_wrap(~sms$status)+
+  xlab("Hour")+
+  ggtitle("Overview of Ham & Spam to SMS")
+
+ggplotly(plot1)
+```
+
+
+## Exploring Data
+
+```{r}
+set.seed(100)
+sms <- sms %>% 
+  select("label" = status, "text" = text) %>% 
+  mutate("label" = as.factor(label))
+class(sms)
+sms[sample(nrow(sms), 10),"text"]
+```
+
+
+# Data Processing
+
+## Change data type to corpus
+
+I prepare a corpus of all the documents in the dataframe.
+
+```{r}
+
+sms.corpus <- VCorpus(VectorSource(sms$text))
+class(sms.corpus)
+sms.corpus[[6]]$content
+```
+
+## Data Cleaning
+
+Next, I clean up the corpus by eliminating numbers, punctuation, white space, and by converting to lower case. I use the tm_map() function from the ‘tm’ package to this end.
+
+### Tolower
+`
+```{r}
+sms.corpus <- tm_map(sms.corpus, FUN = content_transformer(tolower))
+sms.corpus[[6]]$content
+```
+
+### removeNumbers
+
+```{r}
+sms.corpus <- tm_map(sms.corpus, FUN = removeNumbers)
+sms.corpus[[6]]$content
+```
+
+### removeWords / stopwords 
+
+```{r}
+
+
+stopword_id <- readr::read_lines("C2/stoplist-id.txt")
+sms.corpus <- tm_map(sms.corpus, removeWords, stopword_id )
+sms.corpus <- tm_map(sms.corpus, removeWords, stopwords("english") )
+sms.corpus[[6]]$content
+```
+
+### removePunctuation
+
+```{r}
+sms.corpus <- tm_map(sms.corpus, removePunctuation)
+sms.corpus[[6]]$content
+```
+
+
+### stripWhitespace
+
+```{r}
+sms.corpus <- tm_map(sms.corpus, stripWhitespace)
+sms.corpus[[6]]$content
+```
+
+
+## The Document Term Matrix or Tokenization 
+
+In this approach, I represent each word in a document as a token (or feature) with a document term matrix (DTM). The rows of the DTM correspond to documents in the collection, columns correspond to terms, and its elements are the term frequencies. I use a built-in function from the ‘tm’ package to create the DTM
+
+```{r}
+sms.dtm <- DocumentTermMatrix(sms.corpus)
+
+inspect(sms.dtm)
+```
+
+## TermDocMatrix
+
+To see the number of occurrences of words in the document
+
+```{r}
+sms.tdm <- TermDocumentMatrix(sms.corpus)
+inspect(sms.tdm)
+m <- as.matrix(sms.tdm)
+v <- sort(rowSums(m),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+head(d)
+```
+
+## Wordcloud
+
+```{r warning=F}
+set.seed(100)
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+
+```
+
+# Build Model
+
+## Cross Validation
+
+Next, I create 80:20 partitions of the document term matrix for training and testing purposes.
+
+```{r}
+set.seed(100)
+index <- sample(nrow(sms.dtm), size = nrow(sms.dtm)*0.8)
+train <- sms.dtm[index,]
+test <- sms.dtm[-index,]
+```
+
+## Feature Selection
+
+```{r}
+dim(train)
+```
+
+The DTM contains 2819 features but not all of them will be useful for classification. I reduce the number of features by ignoring words which appear in less than 20 reviews. To do this, I use ‘findFreqTerms’ function to indentify the frequent words. 
+
+```{r}
+sms_freq <- findFreqTerms(sms.dtm, 20)
+train <- train[,sms_freq]
+test <- test[,sms_freq]
+```
+
+Train and test label
+```{r}
+train_label <- sms[index,1]
+test_label <- sms[-index,1]
+
+```
+
+## Bernoulli
+
+```{r}
+inspect(train)
+bernoulli_conv <- function(x){
+  x <- as.factor(as.numeric(x > 0))
+}
+train_bn <- apply(train, MARGIN = 2, bernoulli_conv)
+test_bn <- apply(test, MARGIN = 2, bernoulli_conv)
+class(train_bn)
+```
+
+
+# The NaiveBayes Algorithm
+
+To train the model I use the naiveBayes function from the ‘e1071’ package. Since Naive Bayes evaluates products of probabilities, I need some way of assigning non-zero probabilities to words which do not occur in the sample. I use Laplace 1 smoothing to this end.
+
+## NaiveBayes Model
+```{r}
+
+model_naive <- naiveBayes(train_bn, y = train_label, laplace = 1)
+
+```
+
+## Testing the predictions
+
+```{r}
+pred <- predict(model_naive, newdata = test_bn, type = "class")
+
+pred2 <- predict(model_naive, newdata = test_bn, type = "raw")
+pred2 <- ifelse(pred2[,2] >= 0.3, "spam", "ham")
+pred2 <- as.factor(pred2)
+```
+
+
+## Model evaluation
+
+```{r}
+
+confusionMatrix(pred2, test_label, positive = "spam")
+```
+
+# The Decision Tree Algorithm
+
+
+## Data Preparing
+```{r}
+set.seed(100)
+index <-  sample(nrow(sms), nrow(sms)*0.80)
+train_dfn <- sms[index,]
+test_dfn <- sms[-index,]
+```
+
+## Data Processing
+
+```{r}
+class(train_bn)
+train_df <- as.data.frame(train_bn)
+train_df$label <- train_dfn$label
+test_df <- as.data.frame(test_bn)
+test_df$label <- test_dfn$label
+```
+
+## Decision Tree Model
+
+```{r}
+model_df <-  ctree(label~., train_df)
+model_df
+```
+
+## Visualize Data
+
+```{r}
+plot(model_df)
+```
+
+
+## Testing the prediction
+
+```{r}
+predict_df <- predict(model_df, test_df, type = "response")
+```
+
+
+## Model Evaluation
+
+```{r}
+confusionMatrix(predict_df, test_df$label , positive = "spam")
+```
+
+# Conclusion
+
+From the results, I got that the NaiveBayes model has the highest Accuracy and Recall value. Therefore, I am going to use it to submit into data submission
+
+# Data Submission
+
+## Preparing Data
+```{r}
+data_submission_ns <- read.csv("sms-cl-spam/data/data-submission.csv")
+
+```
+
+
+```{r}
+data_sub.corpus <- VCorpus(VectorSource(data_submission_ns$text))
+class(data_sub.corpus)
+data_sub.corpus[[6]]$content
+```
+
+```{r}
+data_sub_dtm <- DocumentTermMatrix(data_sub.corpus)
+
+inspect(data_sub_dtm)
+```
+
+```{r}
+
+inspect(data_sub_dtm)
+bernoulli_conv <- function(x){
+  x <- as.factor(as.numeric(x > 0))
+}
+data_sub_bn <- apply(data_sub_dtm, MARGIN = 2, bernoulli_conv)
+
+class(data_sub_bn)
+```
+
+## Testing the prediction
+```{r}
+pred_data_sub <- predict(model_naive, newdata = data_sub_bn, type = "class")
+
+pred_data_sub2 <- predict(model_naive, newdata = data_sub_bn, type = "raw")
+
+pred_data_sub2 <- as.data.frame(pred_data_sub2)
+```
+
+
+
+```{r}
+data_submission_ns$ham <- pred_data_sub2$ham
+data_submission_ns$spam <- pred_data_sub2$spam
+data_submission_ns$status <- pred_data_sub
+```
+
+## Save to csv
+```{r}
+write.csv(x = data_submission_ns, file = "Triwahyudi4_sms-c1-spam.csv")
+```
